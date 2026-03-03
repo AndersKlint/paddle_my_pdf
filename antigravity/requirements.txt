@@ -1,3 +1,4 @@
 paddleocr
 PyMuPDF
 numpy
+opencv-python

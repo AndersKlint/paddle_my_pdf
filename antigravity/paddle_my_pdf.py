@@ -7,7 +7,7 @@ then reconstructs a new PDF with an invisible text layer over the page images.
 Finally compresses the output with Ghostscript.
 
 Usage:
-    python paddle_my_pdf.py input.pdf output.pdf [--model {v4_lite,v4_normal,v5_lite,v5_normal,vl}] [--threads N]
+    python paddle_my_pdf.py input.pdf output.pdf [--model {v4_lite,v4_normal,v5_lite,v5_normal,vl}] [--threads N] [--deskew]
 """
 
 import argparse
@@ -18,6 +18,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import cv2
 import numpy as np
 import fitz  # PyMuPDF
 from paddleocr import PaddleOCR
@@ -50,22 +51,22 @@ MODEL_CONFIGS = {
     },
 }
 
-# Global lock for the OCR engine if needed (standard PaddleOCR is generally thread-safe for inference)
+# Global lock for the OCR engine if needed
 ocr_lock = threading.Lock()
 
 
-def init_ocr(model_key: str):
+def init_ocr(model_key: str, deskew: bool = False):
     """Initialize PaddleOCR or PaddleOCRVL with the chosen model configuration."""
     if model_key == "vl":
         from paddleocr import PaddleOCRVL
         return PaddleOCRVL(
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
+            use_doc_orientation_classify=deskew,
+            use_doc_unwarping=deskew,
         )
-    cfg = MODEL_CONFIGS[model_key]
+    cfg = MODEL_CONFIGS[model_key].copy()
     return PaddleOCR(
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
+        use_doc_orientation_classify=deskew,
+        use_doc_unwarping=deskew,
         use_textline_orientation=False,
         **cfg,
     )
@@ -96,45 +97,103 @@ def extract_ocr_items(results):
     return items
 
 
-def process_page(page_idx, input_pdf_path, tmp_dir, ocr_engine, model_key):
+def get_skew_angle(img):
     """
-    Process a single page: Render -> OCR -> Reconstruct as 1-page PDF.
+    Detect skew angle of a document image based on text line orientation.
+    Returns the angle in degrees to rotate the image for deskewing.
+    """
+    h, w = img.shape[:2]
+    # Resize for faster processing
+    new_h = 800
+    new_w = int(w * (new_h / h))
+    small = cv2.resize(img, (new_w, new_h))
+    
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    # Binary inverse (text becomes white)
+    thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    
+    # Dilate to merge characters into horizontal blocks
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 5))
+    dilate = cv2.dilate(thresh, kernel, iterations=2)
+    
+    contours, _ = cv2.findContours(dilate, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    angles = []
+    for c in contours:
+        if cv2.contourArea(c) < 1000:
+            continue
+        rect = cv2.minAreaRect(c)
+        angle = rect[-1]
+        
+        # Adjust angle based on rectangle orientation (OpenCV 4.5+ logic)
+        (rw, rh) = rect[1]
+        if rw < rh:
+            angle = angle - 90
+            
+        if -45 < angle < 45:
+            angles.append(angle)
+            
+    if not angles:
+        return 0.0
+    
+    return np.median(angles)
+
+
+def rotate_image(img, angle):
+    """Rotate image by the given angle (degrees)."""
+    (h, w) = img.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated = cv2.warpAffine(
+        img, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE
+    )
+    return rotated
+
+
+def process_page(page_idx, input_pdf_path, tmp_dir, ocr_engine, model_key, deskew):
+    """
+    Process a single page: Render -> Deskew -> OCR -> Reconstruct as 1-page PDF.
     Returns the path to the individual page PDF.
     """
     input_pdf_path = str(input_pdf_path)
     tmp_dir = Path(tmp_dir)
     page_pdf_path = tmp_dir / f"page_{page_idx:05d}.pdf"
     
-    # Each thread opens its own PyMuPDF document for thread-safety
     with fitz.open(input_pdf_path) as doc:
         page = doc[page_idx]
         page_w = page.rect.width
         page_h = page.rect.height
         
-        # Render to image
+        # 1. Render to image
         zoom = RENDER_DPI / 72.0
         pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-        img_w = pix.width
-        img_h = pix.height
+        img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR) if pix.n == 3 else cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
         
-        img_path = str(tmp_dir / f"page_{page_idx:05d}.png")
-        pix.save(img_path)
+        # 2. Deskew if requested
+        bg_img_path = str(tmp_dir / f"page_proc_{page_idx:05d}.png")
+        if deskew:
+            angle = get_skew_angle(img_bgr)
+            if abs(angle) > 0.1:
+                img_bgr = rotate_image(img_bgr, angle)
+                print(f"  Page {page_idx + 1}: Deskewed by {-angle:.2f} degrees")
         
-        # Run OCR (with lock for safety, though Paddle often handles concurrency well internally)
+        cv2.imwrite(bg_img_path, img_bgr)
+        img_h, img_w = img_bgr.shape[:2]
+
+        # 3. Run OCR
         with ocr_lock:
-            results = list(ocr_engine.predict(img_path))
+            results = list(ocr_engine.predict(bg_img_path))
         
         items = extract_ocr_items(results)
-        
-        # Print progress summary
         print(f"  Page {page_idx + 1}: Found {len(items)} text regions")
-        if items:
-            print(f"    Sample: {items[0][0]}")
             
-        # Build new 1-page PDF
+        # 4. Build new 1-page PDF
         dst_doc = fitz.open()
+        # Maintain aspect ratio of potentially deskewed image
+        page_h = (img_h / img_w) * page_w
         new_page = dst_doc.new_page(width=page_w, height=page_h)
-        new_page.insert_image(new_page.rect, filename=img_path)
+        new_page.insert_image(new_page.rect, filename=bg_img_path)
         
         font = fitz.Font(fontfile=CJK_FONT_PATH)
         
@@ -151,14 +210,10 @@ def process_page(page_idx, input_pdf_path, tmp_dir, ocr_engine, model_key):
             box_w = x1 - x0
             box_h = y1 - y0
             
-            # Small font size for correct selection height
             font_size = max(box_h * 0.35, 4)
-            
-            # Measure actual text width to calculate horizontal scale
             actual_w = font.text_length(text, fontsize=font_size)
             h_scale = box_w / actual_w if actual_w > 0 else 1.0
             
-            # Insert invisible text
             origin = fitz.Point(x0, y1 - box_h * 0.1)
             try:
                 new_page.insert_text(
@@ -179,7 +234,7 @@ def process_page(page_idx, input_pdf_path, tmp_dir, ocr_engine, model_key):
     return page_pdf_path
 
 
-def build_searchable_pdf(input_pdf: str, raw_output: str, ocr_engine, model_key: str, threads: int):
+def build_searchable_pdf(input_pdf: str, raw_output: str, ocr_engine, model_key: str, threads: int, deskew: bool):
     """
     Build a searchable PDF using multithreading.
     """
@@ -192,16 +247,14 @@ def build_searchable_pdf(input_pdf: str, raw_output: str, ocr_engine, model_key:
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_dir = Path(tmp_dir)
         
-        # Process pages in parallel
         with ThreadPoolExecutor(max_workers=threads) as executor:
             futures = [
-                executor.submit(process_page, i, input_pdf, tmp_dir, ocr_engine, model_key)
+                executor.submit(process_page, i, input_pdf, tmp_dir, ocr_engine, model_key, deskew)
                 for i in range(total_pages)
             ]
             page_pdfs = [f.result() for f in futures]
             
         print("\nMerging pages...")
-        # Merge all single-page PDFs in order
         merged_doc = fitz.open()
         for p_pdf in sorted(page_pdfs):
             with fitz.open(str(p_pdf)) as page_doc:
@@ -252,6 +305,11 @@ def main():
         default=4,
         help="Number of threads for parallel page processing (default: 4)",
     )
+    parser.add_argument(
+        "--deskew",
+        action="store_true",
+        help="Enable automatic deskewing and unwarping of pages",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -261,17 +319,18 @@ def main():
 
     print(f"Model: {args.model}")
     print(f"Threads: {args.threads}")
+    print(f"Deskew: {args.deskew}")
     print(f"Input: {input_path}")
     print(f"Output: {args.output}")
 
     print("\n[1/3] Initializing PaddleOCR...")
-    ocr = init_ocr(args.model)
+    ocr = init_ocr(args.model, args.deskew)
 
     print("\n[2/3] Running OCR and building searchable PDF...")
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         raw_path = tmp.name
 
-    build_searchable_pdf(str(input_path), raw_path, ocr, args.model, args.threads)
+    build_searchable_pdf(str(input_path), raw_path, ocr, args.model, args.threads, args.deskew)
 
     print("\n[3/3] Compressing output PDF...")
     compress_pdf(raw_path, args.output)
