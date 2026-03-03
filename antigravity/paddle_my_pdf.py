@@ -61,12 +61,12 @@ def init_ocr(model_key: str, deskew: bool = False):
         from paddleocr import PaddleOCRVL
         return PaddleOCRVL(
             use_doc_orientation_classify=deskew,
-            use_doc_unwarping=deskew,
+            use_doc_unwarping=False,  # We handle deskewing manually
         )
     cfg = MODEL_CONFIGS[model_key].copy()
     return PaddleOCR(
         use_doc_orientation_classify=deskew,
-        use_doc_unwarping=deskew,
+        use_doc_unwarping=False,  # We handle deskewing manually
         use_textline_orientation=False,
         **cfg,
     )
@@ -144,8 +144,9 @@ def rotate_image(img, angle):
     (h, w) = img.shape[:2]
     center = (w // 2, h // 2)
     M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    # Use white border for PDF pages
     rotated = cv2.warpAffine(
-        img, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE
+        img, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255)
     )
     return rotated
 
@@ -214,7 +215,7 @@ def process_page(page_idx, input_pdf_path, tmp_dir, ocr_engine, model_key, deske
             actual_w = font.text_length(text, fontsize=font_size)
             h_scale = box_w / actual_w if actual_w > 0 else 1.0
             
-            origin = fitz.Point(x0, y1 - box_h * 0.1)
+            origin = fitz.Point(x0, y1 - box_h * 0.15)
             try:
                 new_page.insert_text(
                     origin,
