@@ -7,7 +7,7 @@ then reconstructs a new PDF with an invisible text layer over the page images.
 Finally compresses the output with Ghostscript.
 
 Usage:
-    python paddle_my_pdf.py input.pdf output.pdf [--model {v4_lite,v4_normal,v5_lite,v5_normal}]
+    python paddle_my_pdf.py input.pdf output.pdf [--model {v4_lite,v4_normal,v5_lite,v5_normal,vl}]
 """
 
 import argparse
@@ -26,7 +26,7 @@ RENDER_DPI = 200
 # System CJK font for the invisible text layer
 CJK_FONT_PATH = "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc"
 
-# Model configurations
+# Model configurations for standard PP-OCR models
 MODEL_CONFIGS = {
     "v4_lite": {
         "ocr_version": "PP-OCRv4",
@@ -49,8 +49,14 @@ MODEL_CONFIGS = {
 }
 
 
-def init_ocr(model_key: str) -> PaddleOCR:
-    """Initialize PaddleOCR with the chosen model configuration."""
+def init_ocr(model_key: str):
+    """Initialize PaddleOCR or PaddleOCRVL with the chosen model configuration."""
+    if model_key == "vl":
+        from paddleocr import PaddleOCRVL
+        return PaddleOCRVL(
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+        )
     cfg = MODEL_CONFIGS[model_key]
     return PaddleOCR(
         use_doc_orientation_classify=False,
@@ -60,7 +66,32 @@ def init_ocr(model_key: str) -> PaddleOCR:
     )
 
 
-def build_searchable_pdf(input_pdf: str, raw_output: str, ocr_engine: PaddleOCR):
+def extract_ocr_items(results, model_key: str):
+    """
+    Extract (text, score, poly) tuples from OCR results.
+    Handles both standard PaddleOCR and PaddleOCR-VL output formats.
+    """
+    items = []
+    for res in results:
+        # Standard OCR: rec_texts + rec_polys
+        texts = res.get("rec_texts", [])
+        scores = res.get("rec_scores", [])
+        polys = res.get("rec_polys", [])
+
+        # VL model may use dt_polys instead of rec_polys
+        if not polys:
+            polys = res.get("dt_polys", [])
+        if not scores:
+            scores = res.get("dt_scores", [1.0] * len(texts))
+
+        for text, score, poly in zip(texts, scores, polys):
+            if score < 0.3 or not text.strip():
+                continue
+            items.append((text, score, np.array(poly, dtype=float)))
+    return items
+
+
+def build_searchable_pdf(input_pdf: str, raw_output: str, ocr_engine, model_key: str):
     """
     Build a searchable PDF by:
     1. Rendering each page as an image
@@ -70,6 +101,9 @@ def build_searchable_pdf(input_pdf: str, raw_output: str, ocr_engine: PaddleOCR)
     src = fitz.open(input_pdf)
     dst = fitz.open()
     total_pages = len(src)
+
+    # Load font once for TextWriter usage
+    font = fitz.Font(fontfile=CJK_FONT_PATH)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
@@ -97,51 +131,48 @@ def build_searchable_pdf(input_pdf: str, raw_output: str, ocr_engine: PaddleOCR)
 
             # Run OCR
             results = list(ocr_engine.predict(img_path))
+            items = extract_ocr_items(results, model_key)
 
-            # Overlay invisible text using system CJK font
-            text_count = 0
-            font_xref = new_page.insert_font(fontfile=CJK_FONT_PATH, fontname="NotoSansCJK")
-            for res in results:
-                texts = res.get("rec_texts", [])
-                scores = res.get("rec_scores", [])
-                polys = res.get("rec_polys", [])
-                if not texts:
-                    continue
-                for text, score, poly in zip(texts, scores, polys):
-                    if score < 0.3:
-                        continue
-                    text_count += 1
+            # Log first few results for debugging
+            for i, (text, score, _) in enumerate(items[:5]):
+                print(f"    [{i+1}] score={score:.3f} text={text}")
 
-                    # Log first few results for debugging
-                    if text_count <= 5:
-                        print(f"    [{text_count}] score={score:.3f} text={text}")
 
-                    # Scale from image pixels to PDF points
-                    pts = np.array(poly, dtype=float)
-                    pts[:, 0] *= page_w / img_w
-                    pts[:, 1] *= page_h / img_h
+            # Overlay invisible text with correct width scaling
+            for text, score, poly in items:
+                # Scale from image pixels to PDF points
+                pts = poly.copy()
+                pts[:, 0] *= page_w / img_w
+                pts[:, 1] *= page_h / img_h
 
-                    # poly order: top-left, top-right, bottom-right, bottom-left
-                    # Both OCR and PyMuPDF use top-left origin, so no Y-flip needed
-                    x0 = float(pts[:, 0].min())
-                    y0 = float(pts[:, 1].min())
-                    x1 = float(pts[:, 0].max())
-                    y1 = float(pts[:, 1].max())
-                    box_h = y1 - y0
+                x0 = float(pts[:, 0].min())
+                y0 = float(pts[:, 1].min())
+                x1 = float(pts[:, 0].max())
+                y1 = float(pts[:, 1].max())
+                box_w = x1 - x0
+                box_h = y1 - y0
 
-                    font_size = max(box_h * 0.8, 4)
+                # Small font size for correct selection height
+                font_size = max(box_h * 0.35, 4)
+                
+                # Measure actual text width to calculate horizontal scale
+                actual_w = font.text_length(text, fontsize=font_size)
+                h_scale = box_w / actual_w if actual_w > 0 else 1.0
 
-                    # Insert invisible text (render_mode=3 = invisible)
-                    # insert_text point is the baseline start; baseline ≈ bottom of box
-                    new_page.insert_text(
-                        fitz.Point(x0, y1 - box_h * 0.1),
-                        text,
-                        fontsize=font_size,
-                        fontname="NotoSansCJK",
-                        render_mode=3,
-                    )
+                # Insert invisible text (render_mode=3 = invisible)
+                # Use morph for horizontal scaling to match box width
+                origin = fitz.Point(x0, y1 - box_h * 0.1)
+                new_page.insert_text(
+                    origin,
+                    text,
+                    fontsize=font_size,
+                    fontname="NotoSansCJK",
+                    fontfile=CJK_FONT_PATH,
+                    morph=(origin, fitz.Matrix(h_scale, 1)),
+                    render_mode=3,
+                )
 
-            print(f"    Found {text_count} text regions")
+            print(f"    Found {len(items)} text regions")
 
         src.close()
         dst.save(raw_output)
@@ -180,7 +211,7 @@ def main():
     parser.add_argument("output", help="Path for output searchable PDF")
     parser.add_argument(
         "--model",
-        choices=["v4_lite", "v4_normal", "v5_lite", "v5_normal"],
+        choices=["v4_lite", "v4_normal", "v5_lite", "v5_normal", "vl"],
         default="v5_lite",
         help="OCR model variant (default: v5_lite)",
     )
@@ -202,7 +233,7 @@ def main():
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         raw_path = tmp.name
 
-    build_searchable_pdf(str(input_path), raw_path, ocr)
+    build_searchable_pdf(str(input_path), raw_path, ocr, args.model)
 
     print("[3/3] Compressing output PDF...")
     compress_pdf(raw_path, args.output)
