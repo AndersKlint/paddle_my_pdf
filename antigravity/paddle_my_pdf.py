@@ -135,11 +135,21 @@ def process_page(page_idx, input_pdf, tmp_dir, ocr_engine, deskew):
     page_w = page.rect.width
     page_h = page.rect.height
 
-    # 1. Render to image with resolution capping
-    # Calculate zoom for requested DPI
-    zoom = MAX_DPI / 72.0
+    # 1. Render to image with resolution intelligence
+    # Inspect page for existing images to determine "native" resolution
+    images = page.get_image_info()
+    if images:
+        # Find the largest image by area
+        largest_img = max(images, key=lambda x: x["width"] * x["height"])
+        img_w_raw = largest_img["width"]
+        img_h_raw = largest_img["height"]
+        # Determine zoom to match this resolution
+        zoom = min(img_w_raw / page_w, img_h_raw / page_h)
+    else:
+        # Fallback to DEFAULT_DPI if no images found
+        zoom = DEFAULT_DPI / 72.0
     
-    # Check if this zoom exceeds our pixel limit
+    # Safety check: ensure zoom doesn't exceed our pixel limit
     if page_w * zoom > MAX_PIXEL_SIDE or page_h * zoom > MAX_PIXEL_SIDE:
         zoom = min(MAX_PIXEL_SIDE / page_w, MAX_PIXEL_SIDE / page_h)
 
