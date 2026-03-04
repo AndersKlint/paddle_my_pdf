@@ -24,12 +24,15 @@ import cv2
 
 import numpy as np
 import fitz  # PyMuPDF
-from paddleocr import PaddleOCR
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from paddleocr import PaddleOCR
 
 # DPI controls
+# DPI and Resolution controls
 DEFAULT_DPI = 150
-MAX_DPI = 250  # smaller max DPI for reasonable PDF size
+MAX_DPI = 200
+MAX_PIXEL_SIDE = 3000  # Cap resolution to prevent massive memory usage
 JPEG_QUALITY = 80
 
 CJK_FONT_PATH = "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc"
@@ -125,92 +128,119 @@ def rotate_image(img, angle):
 
 # ---- MAIN PROCESSING ----
 
-def build_searchable_pdf(input_pdf, output_pdf, ocr_engine, deskew):
+def process_page(page_idx, input_pdf, tmp_dir, ocr_engine, deskew):
+    """Process a single page: Render -> Deskew -> OCR -> 1-page PDF."""
     src_doc = fitz.open(input_pdf)
-    dst_doc = fitz.open()
-    total_pages = len(src_doc)
-    print(f"Processing {total_pages} pages...")
+    page = src_doc[page_idx]
+    page_w = page.rect.width
+    page_h = page.rect.height
 
-    for page_idx in range(total_pages):
-        page = src_doc[page_idx]
-        page_w = page.rect.width
-        page_h = page.rect.height
+    # 1. Render to image with resolution capping
+    # Calculate zoom for requested DPI
+    zoom = MAX_DPI / 72.0
+    
+    # Check if this zoom exceeds our pixel limit
+    if page_w * zoom > MAX_PIXEL_SIDE or page_h * zoom > MAX_PIXEL_SIDE:
+        zoom = min(MAX_PIXEL_SIDE / page_w, MAX_PIXEL_SIDE / page_h)
 
-        # Render DPI
-        zoom = min(MAX_DPI / 72.0, 250 / 72.0)
-        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-        img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-        if pix.n == 4:
-            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
-        elif pix.n == 3:
-            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-        else:
-            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+    img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+    
+    if pix.n == 4:
+        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGR)
+    elif pix.n == 3:
+        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+    else:
+        img_bgr = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
 
-        # Deskew
-        if deskew:
-            angle = get_skew_angle(img_bgr)
-            if abs(angle) > 0.1:
-                img_bgr = rotate_image(img_bgr, angle)
-                print(f"Page {page_idx+1}: Deskewed by {-angle:.2f}°")
+    # 2. Deskew
+    if deskew:
+        angle = get_skew_angle(img_bgr)
+        if abs(angle) > 0.1:
+            img_bgr = rotate_image(img_bgr, angle)
+            print(f"  Page {page_idx+1}: Deskewed by {-angle:.2f}°")
 
-        img_h, img_w = img_bgr.shape[:2]
+    img_h, img_w = img_bgr.shape[:2]
 
-        # Write temp JPEG
-        fd, tmp_img_path = tempfile.mkstemp(suffix=".jpg")
-        os.close(fd)
-        cv2.imwrite(tmp_img_path, img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+    # 3. Write temp JPEG
+    tmp_img_path = os.path.join(tmp_dir, f"page_{page_idx:05d}.jpg")
+    cv2.imwrite(tmp_img_path, img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
 
-        # OCR
-        with ocr_lock:
-            results = list(ocr_engine.predict(tmp_img_path))
-        items = extract_ocr_items(results)
-        print(f"Page {page_idx+1}: {len(items)} text regions")
+    # 4. OCR (Thread-locked)
+    with ocr_lock:
+        results = list(ocr_engine.predict(tmp_img_path))
+    items = extract_ocr_items(results)
+    print(f"  Page {page_idx+1}: {len(items)} text regions")
 
-        # Build PDF page
-        new_page = dst_doc.new_page(width=page_w, height=page_h)
-        new_page.insert_image(new_page.rect, filename=tmp_img_path)
-        os.remove(tmp_img_path)
+    # 5. Build 1-page PDF
+    page_pdf_path = os.path.join(tmp_dir, f"page_{page_idx:05d}.pdf")
+    pg_doc = fitz.open()
+    # Adjust page height if aspect ratio changed due to deskew/rotation
+    final_page_h = (img_h / img_w) * page_w
+    new_page = pg_doc.new_page(width=page_w, height=final_page_h)
+    new_page.insert_image(new_page.rect, filename=tmp_img_path)
+    
+    font = fitz.Font(fontfile=CJK_FONT_PATH)
+    for text, poly in items:
+        pts = poly.copy()
+        pts[:, 0] *= page_w / img_w
+        pts[:, 1] *= final_page_h / img_h
 
-        font = fitz.Font(fontfile=CJK_FONT_PATH)
-        for text, poly in items:
-            pts = poly.copy()
-            pts[:, 0] *= page_w / img_w
-            pts[:, 1] *= page_h / img_h
+        x0 = float(pts[:, 0].min())
+        y0 = float(pts[:, 1].min())
+        x1 = float(pts[:, 0].max())
+        y1 = float(pts[:, 1].max())
+        box_w = x1 - x0
+        box_h = y1 - y0
 
-            x0 = float(pts[:, 0].min())
-            y0 = float(pts[:, 1].min())
-            x1 = float(pts[:, 0].max())
-            y1 = float(pts[:, 1].max())
-            box_w = x1 - x0
-            box_h = y1 - y0
+        font_size = max(box_h * 0.35, 4)
+        actual_w = font.text_length(text, fontsize=font_size)
+        h_scale = box_w / actual_w if actual_w > 0 else 1.0
+        origin = fitz.Point(x0, y1 - box_h * 0.15)
+        try:
+            new_page.insert_text(
+                origin,
+                text,
+                fontsize=font_size,
+                fontname="NotoSansCJK",
+                fontfile=CJK_FONT_PATH,
+                morph=(origin, fitz.Matrix(h_scale, 1)),
+                render_mode=3,
+            )
+        except Exception:
+            continue
 
-            font_size = max(box_h * 0.35, 4)
-            actual_w = font.text_length(text, fontsize=font_size)
-            h_scale = box_w / actual_w if actual_w > 0 else 1.0
-            origin = fitz.Point(x0, y1 - box_h * 0.15)
-            try:
-                new_page.insert_text(
-                    origin,
-                    text,
-                    fontsize=font_size,
-                    fontname="NotoSansCJK",
-                    fontfile=CJK_FONT_PATH,
-                    morph=(origin, fitz.Matrix(h_scale, 1)),
-                    render_mode=3,
-                )
-            except Exception:
-                continue
-
+    pg_doc.save(page_pdf_path, garbage=4, clean=True, deflate=True)
+    pg_doc.close()
     src_doc.close()
-    dst_doc.save(
-        output_pdf,
-        garbage=4,
-        clean=True,
-        deflate=True,
-        deflate_fonts=True,
-    )
-    dst_doc.close()
+    os.remove(tmp_img_path)
+    
+    return page_pdf_path
+
+
+def build_searchable_pdf(input_pdf, output_pdf, ocr_engine, threads, deskew):
+    src_doc = fitz.open(input_pdf)
+    total_pages = len(src_doc)
+    src_doc.close()
+    
+    print(f"Processing {total_pages} pages with {threads} threads...")
+
+    with tempfile.TemporaryDirectory() as tmp_dir_name:
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = [
+                executor.submit(process_page, i, input_pdf, tmp_dir_name, ocr_engine, deskew)
+                for i in range(total_pages)
+            ]
+            page_pdfs = [f.result() for f in futures]
+
+        print("Merging pages...")
+        dst_doc = fitz.open()
+        for p_pdf in sorted(page_pdfs):
+            with fitz.open(p_pdf) as pg:
+                dst_doc.insert_pdf(pg)
+        
+        dst_doc.save(output_pdf, garbage=4, clean=True, deflate=True)
+        dst_doc.close()
 
 
 def compress_pdf(input_path: str, output_path: str):
@@ -248,6 +278,7 @@ def main():
         choices=["v4_lite", "v4_normal", "v5_lite", "v5_normal", "vl"],
         default="v5_lite",
     )
+    parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--deskew", action="store_true")
     parser.add_argument("--skip-ocr", action="store_true")
 
@@ -267,7 +298,7 @@ def main():
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         raw_path = tmp.name
 
-    build_searchable_pdf(str(input_path), raw_path, ocr, args.deskew)
+    build_searchable_pdf(str(input_path), raw_path, ocr, args.threads, args.deskew)
 
     print("Compressing output PDF...")
     compress_pdf(raw_path, args.output)
