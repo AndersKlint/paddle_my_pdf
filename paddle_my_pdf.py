@@ -1,10 +1,11 @@
+
 #!/usr/bin/env python3
 """
 paddle_my_pdf.py — Make a Chinese PDF searchable using PaddleOCR.
 
 Deskews pages if requested.
 Rebuilds PDF with JPEG compression and invisible text layer.
-Fully cross-platform. No Ghostscript needed.
+Fully cross-platform.
 
 Usage:
     python paddle_my_pdf.py input.pdf output.pdf
@@ -22,14 +23,15 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import fitz  # PyMuPDF
+import fitz
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from paddleocr import PaddleOCR
 
+
 # ---- DPI POLICY ----
-TARGET_DPI = 250
-JPEG_QUALITY = 95
+TARGET_DPI = 300
+JPEG_QUALITY = 85
 
 CJK_FONT_PATH = "/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc"
 
@@ -50,13 +52,16 @@ ocr_lock = threading.Lock()
 
 
 def init_ocr(model_key: str, deskew: bool = False):
+
     if model_key == "vl":
         from paddleocr import PaddleOCRVL
         return PaddleOCRVL(
             use_doc_orientation_classify=deskew,
             use_doc_unwarping=False,
         )
+
     cfg = MODEL_CONFIGS[model_key].copy()
+
     return PaddleOCR(
         use_doc_orientation_classify=deskew,
         use_doc_unwarping=False,
@@ -66,44 +71,70 @@ def init_ocr(model_key: str, deskew: bool = False):
 
 
 def extract_ocr_items(results):
+
     items = []
+
     for res in results:
+
         texts = res.get("rec_texts", [])
         scores = res.get("rec_scores", [])
         polys = res.get("rec_polys", [])
+
         if not polys:
             polys = res.get("dt_polys", [])
+
         if not scores:
             scores = res.get("dt_scores", [1.0] * len(texts))
+
         for text, score, poly in zip(texts, scores, polys):
+
             if score < 0.3 or not text.strip():
                 continue
+
             items.append((text, np.array(poly, dtype=float)))
+
     return items
 
 
 # ---- DESKEW ----
 
 def get_skew_angle(img):
+
     h, w = img.shape[:2]
+
     new_h = 800
     new_w = int(w * (new_h / h))
+
     small = cv2.resize(img, (new_w, new_h))
+
     gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+
+    thresh = cv2.threshold(
+        gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )[1]
+
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 5))
     dilate = cv2.dilate(thresh, kernel, iterations=2)
-    contours, _ = cv2.findContours(dilate, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    contours, _ = cv2.findContours(
+        dilate, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
 
     angles = []
+
     for c in contours:
+
         if cv2.contourArea(c) < 1000:
             continue
+
         rect = cv2.minAreaRect(c)
+
         angle = rect[-1]
         (rw, rh) = rect[1]
+
         if rw < rh:
             angle -= 90
+
         if -45 < angle < 45:
             angles.append(angle)
 
@@ -114,25 +145,27 @@ def get_skew_angle(img):
 
 
 def rotate_image(img, angle):
+
     (h, w) = img.shape[:2]
+
     center = (w // 2, h // 2)
+
     M = cv2.getRotationMatrix2D(center, angle, 1.0)
+
     return cv2.warpAffine(
-        img, M, (w, h),
+        img,
+        M,
+        (w, h),
         flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(255, 255, 255),
     )
 
 
-# ---- MAIN PROCESSING ----
+# ---- DPI DETECTION ----
 
 def detect_page_dpi(page, page_w, page_h):
-    """
-    Determine effective page DPI.
-    - Vector page → 300 DPI
-    - Scan ≥300 DPI → capped to 300
-    """
+
     images = page.get_image_info()
 
     if not images:
@@ -151,14 +184,16 @@ def detect_page_dpi(page, page_w, page_h):
     return min(detected, TARGET_DPI)
 
 
+# ---- PAGE PROCESSING ----
+
 def process_page(page_idx, input_pdf, tmp_dir, ocr_engine, deskew):
+
     src_doc = fitz.open(input_pdf)
     page = src_doc[page_idx]
 
     page_w = page.rect.width
     page_h = page.rect.height
 
-    # ---- DPI LOGIC ----
     dpi = detect_page_dpi(page, page_w, page_h)
     zoom = dpi / 72.0
 
@@ -174,33 +209,41 @@ def process_page(page_idx, input_pdf, tmp_dir, ocr_engine, deskew):
         img_bgr = cv2.cvtColor(img_np, cv2.COLOR_GRAY2BGR)
 
     if deskew:
+
         angle = get_skew_angle(img_bgr)
+
         if abs(angle) > 0.1:
+
             img_bgr = rotate_image(img_bgr, angle)
+
             print(f"  Page {page_idx+1}: Deskewed by {-angle:.2f}°")
 
     img_h, img_w = img_bgr.shape[:2]
 
-    tmp_img_path = os.path.join(tmp_dir, f"page_{page_idx:05d}.jpg")
-    cv2.imwrite(tmp_img_path, img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
-
     with ocr_lock:
-        results = list(ocr_engine.predict(tmp_img_path))
+        results = list(ocr_engine.predict(img_bgr))
 
     items = extract_ocr_items(results)
 
     print(f"  Page {page_idx+1}: {len(items)} text regions ({dpi:.0f} DPI)")
+
+    tmp_img_path = os.path.join(tmp_dir, f"page_{page_idx:05d}.jpg")
+
+    cv2.imwrite(tmp_img_path, img_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
 
     page_pdf_path = os.path.join(tmp_dir, f"page_{page_idx:05d}.pdf")
 
     pg_doc = fitz.open()
 
     final_page_h = (img_h / img_w) * page_w
+
     new_page = pg_doc.new_page(width=page_w, height=final_page_h)
 
     new_page.insert_image(new_page.rect, filename=tmp_img_path)
 
     font = fitz.Font(fontfile=CJK_FONT_PATH)
+
+    text_ops = []
 
     for text, poly in items:
 
@@ -225,36 +268,26 @@ def process_page(page_idx, input_pdf, tmp_dir, ocr_engine, deskew):
 
         origin = fitz.Point(x0, y1 - box_h * 0.15)
 
-        try:
-            new_page.insert_text(
-                origin,
-                text,
-                fontsize=font_size,
-                fontname="NotoSansCJK",
-                fontfile=CJK_FONT_PATH,
-                morph=(origin, fitz.Matrix(h_scale, 1)),
-                render_mode=3,
-            )
-        except Exception:
-            continue
+        text_ops.append((origin, text, font_size, h_scale))
 
-    pg_doc.save(page_pdf_path, garbage=4, clean=True, deflate=True)
+    pg_doc.save(page_pdf_path, garbage=4, clean=True, deflate=True, deflate_images=True)
 
     pg_doc.close()
     src_doc.close()
 
     os.remove(tmp_img_path)
 
-    return page_pdf_path
+    return page_pdf_path, text_ops
 
 
 def compress_pdf(input_path: str, output_path: str):
-    """Compress using Ghostscript to subset fonts and apply lossy JPEG compression."""
+
     gs_cmd = [
         "gs",
         "-sDEVICE=pdfwrite",
         "-dCompatibilityLevel=1.5",
-        "-dPDFSETTINGS=/prepress",
+        "-dPDFSETTINGS=/printer",
+        "-dColorConversionStrategy=/LeaveColorUnchanged",
         "-dAutoFilterColorImages=true",
         "-dColorImageFilter=/DCTEncode",
         f"-dJPEGQuality={JPEG_QUALITY}",
@@ -264,18 +297,19 @@ def compress_pdf(input_path: str, output_path: str):
         f"-sOutputFile={output_path}",
         input_path,
     ]
+
     try:
         subprocess.run(gs_cmd, check=True)
+
     except FileNotFoundError:
-        print(
-            "WARNING: ghostscript (gs) not found. Skipping compression. "
-            "Install with: sudo apt install ghostscript",
-            file=sys.stderr,
-        )
+
+        print("WARNING: ghostscript not found. Skipping compression.", file=sys.stderr)
+
         Path(output_path).write_bytes(Path(input_path).read_bytes())
 
 
 def build_searchable_pdf(input_pdf, output_pdf, ocr_engine, threads, deskew):
+
     src_doc = fitz.open(input_pdf)
     total_pages = len(src_doc)
     src_doc.close()
@@ -291,26 +325,42 @@ def build_searchable_pdf(input_pdf, output_pdf, ocr_engine, threads, deskew):
                 for i in range(total_pages)
             ]
 
-            page_pdfs = [f.result() for f in futures]
+            page_results = [f.result() for f in futures]
 
         print("Merging pages...")
 
         dst_doc = fitz.open()
 
-        for p_pdf in sorted(page_pdfs):
+        for p_pdf, text_ops in page_results:
+
             with fitz.open(p_pdf) as pg:
+
                 dst_doc.insert_pdf(pg)
 
-        dst_doc.save(output_pdf, garbage=4, clean=True, deflate=True)
+            new_page = dst_doc[-1]
+
+            for origin, text, font_size, h_scale in text_ops:
+                try:
+                    new_page.insert_text(
+                        origin,
+                        text,
+                        fontsize=font_size,
+                        fontname="NotoSansCJK",
+                        fontfile=CJK_FONT_PATH,
+                        morph=(origin, fitz.Matrix(h_scale, 1)),
+                        render_mode=3,
+                    )
+                except Exception:
+                    continue
+
+        dst_doc.save(output_pdf, garbage=4, clean=True, deflate=True, deflate_images=True)
 
         dst_doc.close()
 
 
 def main():
 
-    parser = argparse.ArgumentParser(
-        description="Make a Chinese PDF searchable using PaddleOCR"
-    )
+    parser = argparse.ArgumentParser(description="Make a Chinese PDF searchable using PaddleOCR")
 
     parser.add_argument("input")
     parser.add_argument("output")
@@ -330,11 +380,15 @@ def main():
     input_path = Path(args.input)
 
     if not input_path.exists():
+
         print("Input file not found.", file=sys.stderr)
+
         sys.exit(1)
 
     if args.skip_ocr:
+
         compress_pdf(str(input_path), args.output)
+
         return
 
     print("Initializing PaddleOCR...")
@@ -342,12 +396,15 @@ def main():
     ocr = init_ocr(args.model, args.deskew)
 
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+
         raw_path = tmp.name
 
     build_searchable_pdf(str(input_path), raw_path, ocr, args.threads, args.deskew)
 
     print("Compressing output PDF...")
+
     compress_pdf(raw_path, args.output)
+
     Path(raw_path).unlink(missing_ok=True)
 
     in_size = input_path.stat().st_size / 1024
