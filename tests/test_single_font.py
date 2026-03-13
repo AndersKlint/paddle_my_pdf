@@ -12,5 +12,5 @@ for i in range(10):
     page = doc[i]
     page.insert_text((100, 100), f"hello world {i}", fontname="Noto", fontfile=CJK_FONT_PATH)
 
-doc.save("/home/anders/git/paddle_my_pdf/test_single_font.pdf", garbage=4)
+doc.save("test_single_font.pdf", garbage=4)
 print("Single embedded font count sum:", sum([len(doc.get_page_fonts(i)) for i in range(10)]))

@@ -8,4 +8,4 @@ try:
     print("Success with built-in cjk!")
 except Exception as e:
     print("Failed with built-in:", e)
-doc.save("/home/anders/git/paddle_my_pdf/test_cjk.pdf")
+doc.save("test_cjk.pdf")
