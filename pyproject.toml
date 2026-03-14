@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paddle-my-pdf"
+version = "0.1.0"
+description = "Make Chinese PDFs searchable using PaddleOCR"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Anders Klint"}
+]
+dependencies = [
+    "paddleocr",
+    "opencv-python",
+    "numpy",
+    "pymupdf",
+]
+
+[project.scripts]
+paddle-my-pdf = "paddle_my_pdf.cli:main"

@@ -2,8 +2,8 @@
 import argparse
 import sys
 from pathlib import Path
-from src.config import AppConfig
-from src.orchestrator import PDFOCROrchestrator
+from .config import AppConfig
+from .orchestrator import PDFOCROrchestrator
 
 def main():
     parser = argparse.ArgumentParser(description="Make a Chinese PDF searchable using PaddleOCR (Modular Version)")
