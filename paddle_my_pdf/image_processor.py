@@ -1,10 +1,13 @@
 import cv2
 import numpy as np
+
 from .config import TARGET_DPI
+
 
 class ImageProcessor:
     @staticmethod
     def get_skew_angle(img: np.ndarray) -> float:
+        """Estimate the skew angle of a document image in degrees."""
         h, w = img.shape[:2]
         new_h = 800
         new_w = int(w * (new_h / h))
@@ -35,6 +38,7 @@ class ImageProcessor:
 
     @staticmethod
     def rotate_image(img: np.ndarray, angle: float) -> np.ndarray:
+        """Rotate *img* by *angle* degrees around its center."""
         (h, w) = img.shape[:2]
         center = (w // 2, h // 2)
         M = cv2.getRotationMatrix2D(center, angle, 1.0)
@@ -48,7 +52,8 @@ class ImageProcessor:
         )
 
     @staticmethod
-    def detect_page_dpi(page, page_w, page_h) -> float:
+    def detect_page_dpi(page, page_w: float, page_h: float) -> float:
+        """Detect the effective DPI of the largest embedded image on *page*."""
         images = page.get_image_info()
         if not images:
             return float(TARGET_DPI)

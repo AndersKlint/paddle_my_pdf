@@ -6,7 +6,7 @@ from .config import AppConfig
 from .orchestrator import PDFOCROrchestrator
 
 def main():
-    parser = argparse.ArgumentParser(description="Make a Chinese PDF searchable using PaddleOCR (Modular Version)")
+    parser = argparse.ArgumentParser(description="Make scanned PDFs searchable using PaddleOCR")
 
     parser.add_argument("input", help="Input PDF file")
     parser.add_argument("output", help="Output PDF file")

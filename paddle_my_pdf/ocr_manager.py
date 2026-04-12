@@ -1,16 +1,20 @@
 import threading
+from typing import List, Tuple
+
 import numpy as np
 from paddleocr import PaddleOCR
-from .config import MODEL_CONFIGS
+
+from .config import MODEL_CONFIGS, MIN_OCR_CONFIDENCE
+
 
 class OCRManager:
-    def __init__(self, model_key: str, deskew: bool = False):
+    def __init__(self, model_key: str, deskew: bool = False) -> None:
         self.lock = threading.Lock()
         self.model_key = model_key
         self.deskew = deskew
         self.engine = self._init_ocr()
 
-    def _init_ocr(self):
+    def _init_ocr(self) -> PaddleOCR:
         if self.model_key == "vl":
             from paddleocr import PaddleOCRVL
             return PaddleOCRVL(
@@ -26,13 +30,15 @@ class OCRManager:
             **cfg,
         )
 
-    def predict(self, image: np.ndarray):
+    def predict(self, image: np.ndarray) -> List[Tuple[str, np.ndarray]]:
+        """Run OCR on *image* and return ``(text, polygon)`` pairs."""
         with self.lock:
             results = list(self.engine.predict(image))
         return self._extract_ocr_items(results)
 
-    def _extract_ocr_items(self, results):
-        items = []
+    @staticmethod
+    def _extract_ocr_items(results) -> List[Tuple[str, np.ndarray]]:
+        items: List[Tuple[str, np.ndarray]] = []
         for res in results:
             texts = res.get("rec_texts", [])
             scores = res.get("rec_scores", [])
@@ -45,7 +51,7 @@ class OCRManager:
                 scores = res.get("dt_scores", [1.0] * len(texts))
 
             for text, score, poly in zip(texts, scores, polys):
-                if score < 0.3 or not text.strip():
+                if score < MIN_OCR_CONFIDENCE or not text.strip():
                     continue
                 items.append((text, np.array(poly, dtype=float)))
         return items
