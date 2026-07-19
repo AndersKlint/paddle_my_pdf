@@ -13,8 +13,9 @@ authors = [
     {name = "Anders Klint"}
 ]
 dependencies = [
-    "paddleocr",
-    "opencv-python",
+    "paddlepaddle>=3.0,<3.3",
+    "paddleocr>=3.0",
+    "opencv-python-headless",
     "numpy",
     "pymupdf",
 ]

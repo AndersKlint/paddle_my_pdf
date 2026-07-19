@@ -8,8 +8,8 @@ detected bounding-box height exactly.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import List, Tuple
 
 import fitz
@@ -17,33 +17,33 @@ import numpy as np
 
 from .config import CJK_FONT_PATH
 
-# Smallest font size we will ever emit (PDF points).
+_font_lock = threading.Lock()
+
 MIN_FONT_SIZE = 4.0
 
 
 @dataclass
 class TextOp:
-    """One invisible-text insertion destined for a PDF page."""
-
     origin: fitz.Point
     text: str
     font_size: float
     h_scale: float
 
 
-@lru_cache(maxsize=1)
-def _font_metrics() -> Tuple[fitz.Font, float, float, float]:
-    """Return ``(font, ascender, descender, total_height)``, cached.
+_cached_asc_desc: Tuple[float, float, float] | None = None
 
-    *ascender* is a positive fraction of ``font_size`` (distance from
-    baseline to the top of the tallest glyph).  *descender* is negative
-    (distance from baseline to the lowest descender).  *total_height* is
-    ``ascender - descender``.
-    """
-    font = fitz.Font(fontfile=CJK_FONT_PATH)
-    asc = font.ascender
-    desc = font.descender
-    return font, asc, desc, asc - desc
+
+def _font_metrics() -> Tuple[float, float, float]:
+    """Return ``(ascender, descender, total_height)``, cached. Thread-safe."""
+    global _cached_asc_desc
+    if _cached_asc_desc is None:
+        with _font_lock:
+            if _cached_asc_desc is None:
+                font = fitz.Font(fontfile=CJK_FONT_PATH)
+                asc = font.ascender
+                desc = font.descender
+                _cached_asc_desc = (asc, desc, asc - desc)
+    return _cached_asc_desc
 
 
 def compute_text_ops(
@@ -73,7 +73,8 @@ def compute_text_ops(
         are derived from the font's ascender / descender metrics so
         that the selectable region covers the full bounding box.
     """
-    font, ascender, _descender, total_height = _font_metrics()
+    ascender, _descender, total_height = _font_metrics()
+    font = fitz.Font(fontfile=CJK_FONT_PATH)
 
     sx = page_w / img_w
     sy = page_h / img_h
@@ -94,13 +95,8 @@ def compute_text_ops(
         if box_w <= 0 or box_h <= 0:
             continue
 
-        # Size the font so the full ascender-to-descender span equals
-        # the bounding-box height.  This ensures the selectable region
-        # in PDF viewers covers the entire detected text area.
         font_size = max(box_h / total_height, MIN_FONT_SIZE)
 
-        # Horizontal scale: stretch / compress the text to match the
-        # detected bounding-box width exactly.
         natural_w = font.text_length(text, fontsize=font_size)
         h_scale = box_w / natural_w if natural_w > 0 else 1.0
 
