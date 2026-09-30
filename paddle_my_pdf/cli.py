@@ -2,8 +2,11 @@
 import argparse
 import sys
 from pathlib import Path
-from .config import AppConfig
+from .config import MODEL_CONFIGS, AppConfig
 from .orchestrator import PDFOCROrchestrator
+
+MODEL_CHOICES = list(MODEL_CONFIGS) + ["vl"]
+
 
 def main():
     parser = argparse.ArgumentParser(description="Make scanned PDFs searchable using PaddleOCR")
@@ -13,9 +16,9 @@ def main():
 
     parser.add_argument(
         "--model",
-        choices=["v4_lite", "v4_normal", "v5_lite", "v5_normal", "vl"],
+        choices=MODEL_CHOICES,
         default="v5_lite",
-        help="PaddleOCR model to use"
+        help=f"PaddleOCR model to use (default: v5_lite). One of: {', '.join(MODEL_CHOICES)}"
     )
 
     parser.add_argument("--threads", type=int, default=4, help="Number of threads for processing")

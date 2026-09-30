@@ -25,6 +25,18 @@ MODEL_CONFIGS: Dict[str, Dict[str, Any]] = {
         "text_detection_model_name": "PP-OCRv5_server_det",
         "text_recognition_model_name": "PP-OCRv5_server_rec",
     },
+    "v6_tiny": {
+        "text_detection_model_name": "PP-OCRv6_tiny_det",
+        "text_recognition_model_name": "PP-OCRv6_tiny_rec",
+    },
+    "v6_small": {
+        "text_detection_model_name": "PP-OCRv6_small_det",
+        "text_recognition_model_name": "PP-OCRv6_small_rec",
+    },
+    "v6_medium": {
+        "text_detection_model_name": "PP-OCRv6_medium_det",
+        "text_recognition_model_name": "PP-OCRv6_medium_rec",
+    },
 }
 
 

@@ -41,7 +41,24 @@ python -m paddle_my_pdf input.pdf output.pdf --threads 4
 ### Arguments
 - `input`: Path to the input PDF.
 - `output`: Path to the output PDF.
-- `--model`: PaddleOCR model to use (`v4_lite`, `v4_normal`, `v5_lite`, `v5_normal`, `vl`). Default is `v5_lite`.
+- `--model`: PaddleOCR model to use. Default is `v5_lite`.
+
+  | Model | PP-OCR version | Detection | Recognition |
+  |-------|----------------|-----------|-------------|
+  | `v4_lite` | PP-OCRv4 | mobile | mobile |
+  | `v4_normal` | PP-OCRv4 | server | server |
+  | `v5_lite` | PP-OCRv5 | mobile | server |
+  | `v5_normal` | PP-OCRv5 | server | server |
+  | `v6_tiny` | PP-OCRv6 | tiny | tiny |
+  | `v6_small` | PP-OCRv6 | small | small |
+  | `v6_medium` | PP-OCRv6 | medium | medium |
+  | `vl` | PaddleOCR-VL | — | — |
+
+  PP-OCRv6 tiers differ from v4/v5: there is no "lite/normal" split, only
+  `tiny` (fastest, 1.5M params), `small`, and `medium` (most accurate, 34.5M params).
+  The v6 models cover Simplified Chinese, Traditional Chinese, English, Japanese
+  and 46 Latin-script languages in a single recognition model — `v6_tiny` excludes
+  Japanese.
 - `--threads`: Number of threads for parallel page processing. Default is 4.
 - `--deskew`: Enable automatic deskewing of pages.
 - `--skip-ocr`: Skip OCR and only perform Ghostscript compression.
